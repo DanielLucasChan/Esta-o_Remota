@@ -1,0 +1,310 @@
+const String myAPIkey PROGMEM= "NOLI45VCWDQ0ORIP";
+const String login PROGMEM = "AT+CWJAP=\"walunet\",\"28107081\"\r\n";
+const String id_estacao PROGMEM = "1001";
+
+#include <RTClib.h>
+#include <SoftwareSerial.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include "GravityTDS.h"
+#include <LiquidCrystal.h>
+#include <SPI.h>
+#include <SD.h>
+
+File myFile;
+
+SoftwareSerial ESP8266(10, 9); // Rx,  Tx
+
+RTC_DS1307 rtc;
+GravityTDS gravityTds;
+OneWire oneWire(A0);  //Protocolo OneWire//
+DallasTemperature sensors(&oneWire); //encaminha referências OneWire para o sensor//
+LiquidCrystal lcd(2, 7, 3, 8, 5, 6);
+
+const int writingTimer PROGMEM = 25;
+int startTime  = 0;
+int waitTime  = 0;
+
+float temp_f, ph_f, turbidez_f;
+float humidity, tds_f;
+
+unsigned char check_connection  = 0;
+unsigned char times_check  = 0;
+
+void setup()
+{
+  pinMode(A1, INPUT);
+  Serial.begin(9600);
+  ESP8266.begin(9600);
+  sensors.begin();
+  rtc.begin();
+  lcd.begin(16, 2);
+  lcd.clear();
+  gravityTds.setPin(A2);
+  gravityTds.setAref(5.0);
+  gravityTds.setAdcRange(1024);
+  gravityTds.begin();
+
+  Serial.print(F("Inicializando SD card..."));
+  if (!SD.begin(4)) {
+    Serial.println(F("Falha do SD card!"));
+    while (1);
+  }
+  Serial.println(F("SD card inicializado."));
+
+  ESP8266.println("AT+RST");
+  delay(2000);
+
+  ESP8266.println("AT+RST");
+  delay(2000);
+
+  Serial.print(F("-- Iniciando -> Client ID: "));
+  Serial.println(id_estacao);
+  lcd.setCursor(0, 0);
+  lcd.print(F("Conectando ao wifi"));
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("Em Funcionamento"));
+  while (1)
+  {
+    Serial.print(F("."));
+    ESP8266.print(login);
+    ESP8266.setTimeout(5000);
+    if (ESP8266.find("OK\r\n") == 1)
+    {
+      Serial.println(F("WIFI Conectado"));
+      Serial.println(F("Requisição Enviada"));
+      readSensors();
+      writeThingSpeak();
+      break;
+    }
+    times_check++;
+    if (times_check > 2)
+    {
+
+      times_check = 0;
+      Serial.println(F("Tentando Reconectar.."));
+    }
+  }
+}
+void loop()
+{
+  waitTime = millis() - startTime;
+  if (waitTime > (writingTimer * 1000))
+  {
+    while (1)
+    {
+      Serial.print(F("."));
+      ESP8266.print(login);
+      ESP8266.setTimeout(5000);
+      if (ESP8266.find(F("OK\r\n")) == 1)
+      {
+        Serial.println(F("WIFI Conectado"));
+        Serial.println(F("Requisição Enviada"));
+        readSensors();
+        writeThingSpeak();
+        break;
+      }
+      times_check++;
+
+      if (times_check > 10)
+      {
+        myFile = SD.open("DadosSd.txt", FILE_WRITE);
+
+        if (myFile) {
+          Serial.print(F("Escrevendo no DadosSd.txt..."));
+          readSensors();
+          
+          Serial.println(F(""));
+          Serial.println(F("Abertura de função 'gravar dados no SDCard'"));
+          Serial.println(F(""));
+          myFile.print(F("Pacote de medição de sensores: "));
+          myFile.print(F("Temperatura: "));
+          myFile.print(temp_f);
+          myFile.print(F(" °C ||  "));
+          myFile.print(F("Turbidez: "));
+          myFile.print(turbidez_f);
+          myFile.print(F(" NTU || "));
+          myFile.print(F("TDS: "));
+          myFile.print(tds_f);
+          myFile.print(F(" mS/cm || "));
+          myFile.print(F("PH: "));
+          myFile.print(ph_f);
+          myFile.println(F(" ph"));
+          
+          myFile.close();
+          Serial.println(F("Dados Gravado no SdCard"));
+        } else {
+          // if the file didn't open, print an error:
+          Serial.println(F("Erro ao abrir DadosSd.txt"));
+        }
+        times_check = 0;
+        Serial.println(F("Tentando Reconectar.."));
+      }
+    }
+    startTime = millis();
+  }
+}
+
+
+void readSensors(void)
+{
+  sensors.requestTemperatures(); //* Envia o comando para leitura da temperatura */
+  delay(1000);
+  temp_f = sensors.getTempCByIndex(0); //* Endereço do sensor */
+
+  for (int i = 0; i < 5; i++)
+  {
+    if (turbidez_f < 0) turbidez_f = 0;
+    turbidez_f = map (analogRead(A1), 434, 410, 0, 5);
+  }
+
+  turbidez_f = turbidez_f / 4;
+
+  gravityTds.setTemperature(temp_f);
+  gravityTds.update(); 
+  tds_f = gravityTds.getTdsValue();
+
+  for (int i = 0; i < 800; i++)
+  {
+    int measure = analogRead(A3);
+    double voltage = 5 / 1024.0 * measure; //classic digital to voltage conversion
+    ph_f = ph_f + 7.327 + ((2.5 - voltage) / 0.18);
+  }
+  ph_f = ph_f / 799;
+  
+  datahora ();
+  Serial.print(F("Pacote de medição de sensores: "));
+  Serial.print(F("Temperatura: "));
+  Serial.print(temp_f);
+  Serial.print(F(" °C ||  "));
+  Serial.print(F("Turbidez: "));
+  Serial.print(turbidez_f);
+  Serial.print(F(" NTU || "));
+  Serial.print(F("TDS: "));
+  Serial.print(tds_f);
+  Serial.print(F(" mS/cm || "));
+  Serial.print(F("PH: "));
+  Serial.print(ph_f);
+  Serial.println(F(" ph"));
+  tela();
+}
+
+void writeThingSpeak(void)
+{
+  startThingSpeakCmd();
+  // preparacao da string GET
+  String getStr = "GET /update?api_key=";
+  getStr += myAPIkey;
+  getStr += "&field1=";
+  getStr += String(id_estacao);
+  getStr += "&field2=";
+  getStr += String(temp_f);
+  getStr += "&field3=";
+  getStr += String(turbidez_f);
+  getStr += "&field4=";
+  getStr += String(tds_f);
+  getStr += "&field5=";
+  getStr += String(ph_f);
+  getStr += "\r\n\r\n";
+  GetThingspeakcmd(getStr);
+}
+
+void startThingSpeakCmd(void)
+{
+  ESP8266.flush();
+  String cmd = "AT+CIPSTART=\"TCP\",\"";
+  cmd += "184.106.153.149"; // api.thingspeak.com IP address
+  cmd += "\",80";
+  ESP8266.println(cmd);
+  Serial.print(F("Start Commands: "));
+  Serial.println(cmd);
+
+  if (ESP8266.find("Error"))
+  {
+    Serial.println(F("AT+CIPSTART error"));
+    return;
+  }
+}
+
+String GetThingspeakcmd(String getStr)
+{
+  String cmd = "AT+CIPSEND=";
+  cmd += String(getStr.length());
+  ESP8266.println(cmd);
+  Serial.println(cmd);
+
+  if (ESP8266.find(">"))
+  {
+    ESP8266.print(getStr);
+    Serial.println(getStr);
+    delay(500);
+    String messageBody = "";
+    while (ESP8266.available())
+    {
+      String line = ESP8266.readStringUntil('\n');
+      if (line.length() == 1)
+      {
+        messageBody = ESP8266.readStringUntil('\n');
+      }
+    }
+    Serial.print(F("Mensagem Enviada! "));
+    Serial.println(messageBody);
+    Serial.print(F(" "));
+    return messageBody;
+  }
+  else
+  {
+    ESP8266.println("AT+CIPCLOSE");
+    Serial.println(F("AT+CIPCLOSE"));
+    Serial.println(F("Mensagem não enviada"));
+  }
+}
+
+void datahora ()
+{
+  Serial.print(F("Hora: "));              // Imprime o texto "Hora: "
+  Serial.print(rtc.now().hour());      // Imprime a Hora
+  Serial.print(F(":"));                   // Imprime o texto entre aspas
+  Serial.print(rtc.now().minute());    // Imprime o Minuto
+  Serial.print(F(":"));                   // Imprime o texto entre aspas
+  Serial.print(rtc.now().second());    // Imprime o Segundo
+  Serial.print(F("  Data: "));              // Imprime o texto entre aspas
+  Serial.print(rtc.now().day());       // Imprime o Dia
+  Serial.print(F("/"));                   // Imprime o texto entre aspas
+  Serial.print(rtc.now().month());     // Imprime o Mês
+  Serial.print(F("/"));                   // Imprime o texto entre aspas
+  Serial.print(rtc.now().year());      // Imprime o Ano]
+  Serial.println(F(" "));
+}
+
+void tela()
+{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("Temp.:"));
+  lcd.setCursor(2, 1);
+  lcd.print(temp_f);
+  lcd.print(F("C°"));
+  delay(1500);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("Turb:"));
+  lcd.setCursor(0, 1);
+  lcd.print(turbidez_f);
+  lcd.print(F(" NTU"));
+  delay(1500);
+  lcd.setCursor(0, 0);
+  lcd.print(F("PH:"));
+  lcd.setCursor(0, 1);
+  lcd.print(ph_f);
+  delay(1500);
+  lcd.setCursor(0, 0);
+  lcd.print(F("TDS:"));
+  lcd.setCursor(0, 1);
+  lcd.print(tds_f, 0);
+  lcd.print(F(" mS/cm"));
+  lcd.clear();
+  lcd.setCursor(1, 0);
+  lcd.print(F("Enviando Dados"));
+}
